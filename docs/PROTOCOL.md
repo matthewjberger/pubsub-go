@@ -115,18 +115,21 @@ Every frame sent from broker to client is a `BrokerMessage`:
 
 ## Delivery semantics
 
-- **Best-effort.** Each subscriber has a bounded outbound buffer on the broker side. If a subscriber is too slow to drain, messages are dropped for that subscriber (with a broker-side log line). No retry, no NAK, no per-subscriber backpressure to the publisher.
-- **At-most-once.** A message that is dropped for a slow subscriber is dropped, not retried.
-- **No ordering across topics.** Within a single subscriber, messages on the same topic from the same publisher arrive in publish order. Across topics or across publishers, no global ordering is guaranteed (the broker processes events from one peer at a time but other peers may interleave between any two of yours).
-- **No persistence.** Messages are not stored. A subscriber that subscribes after a publish has happened does not see the historical message.
+Delivery is best-effort, at-most-once. Each subscriber has a bounded outbound buffer on the broker side. If a subscriber is too slow to drain, the broker drops the message for that subscriber and writes one log line. No retry, no NAK, no per-subscriber backpressure to the publisher. A dropped message is gone.
+
+Within a single subscriber, messages on the same topic from the same publisher arrive in publish order. Across topics or across publishers there is no global ordering. The broker processes events from one peer at a time, but other peers may interleave between any two of yours.
+
+Messages are not stored. A subscriber that subscribes after a publish has happened does not see the historical message.
 
 ## Error handling
 
-- **Malformed frame.** Either side closes the connection. There is no error frame.
-- **Frame too large.** Either side closes the connection.
-- **Wrong first frame.** The broker closes the connection without sending anything.
-- **Slow subscriber.** The broker drops the message for that subscriber only and logs it. The subscriber's connection stays open.
-- **Disconnected publisher.** The broker scrubs the publisher's subscriptions on EOF. Already-fanned-out messages still reach subscribers.
+Malformed frames close the connection on whichever side reads them. Same for frames over `MaxFrameSize`. There is no error frame.
+
+If a client's first frame is not a valid `connect`, the broker closes the connection without sending anything.
+
+A slow subscriber gets its message dropped (and logged broker-side) but its connection stays open. The broker does not retaliate against the subscriber.
+
+When a publisher disconnects, the broker scrubs its subscriptions on EOF. Messages that had already been fanned out still reach subscribers.
 
 ## Multi-language interop
 

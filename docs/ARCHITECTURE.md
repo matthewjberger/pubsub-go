@@ -155,11 +155,15 @@ Total goroutines involved for a publish to N subscribers: 1 publisher writer (th
 
 ## Design notes
 
-- **Data-oriented, not object-oriented.** Wire types are plain structs with no methods. State for the broker and client lives in plain struct fields. Behaviour is in package-level functions that take the state as an argument (`Publish(c, ...)`, `Subscribe(c, ...)`, `registerPeer(b, ...)`, `publishToSubscribers(b, ...)`). The only methods exist for Go-standard lifecycle (`Close`, `Shutdown`) and trivial accessors (`ID`, `Address`).
-- **Single mutator.** The broker has one goroutine touching the peer and subscription maps. No locks, no sync.Map. Any new operation just becomes a new variant of `brokerEvent`.
-- **No reflection in the protocol.** `json.RawMessage` carries application payloads verbatim. The broker never re-encodes a publish.
-- **Bounded queues.** Every channel is buffered with a small capacity and either drops on overflow (broker fan-out) or backpressures the caller (client writes). Nothing grows without bound.
-- **Generation-counter pattern, borrowed from elsewhere.** The reader/writer/loop split, and the stale-disconnect identity check on reconnect, are the same shape as a Rust pub/sub broker the author wrote previously. That version used a monotonic generation counter per peer ID; this one uses the per-connection outbound channel as the identity token. Both solve the same race.
+The wire types are plain structs with no methods. State for the broker and client lives in plain struct fields. Behaviour is in package-level functions that take the state as their first argument: `Publish(c, ...)`, `Subscribe(c, ...)`, `registerPeer(b, ...)`, `publishToSubscribers(b, ...)`. The only methods are Go-standard lifecycle (`Close`, `Shutdown`) and trivial accessors (`ID`, `Address`). Data-oriented, not object-oriented.
+
+One goroutine on the broker touches the peer and subscription maps. No locks, no `sync.Map`. Any new operation becomes a new variant of `brokerEvent` handled in the same loop. Adding a feature does not introduce a new mutator.
+
+`json.RawMessage` carries application payloads verbatim. The broker never re-encodes a publish, never reflects on payload shape, never needs to know an application's schema.
+
+Every channel is buffered with a small capacity and either drops on overflow (the broker's fan-out path) or backpressures the caller (client writes). Nothing grows without bound.
+
+The reader/writer/loop split and the stale-disconnect identity check on reconnect are the same shape as a Rust pub/sub broker I wrote previously. That version used a monotonic generation counter per peer ID; this one uses the per-connection outbound channel as the identity token. Both solve the same race.
 
 ## What is intentionally not here
 

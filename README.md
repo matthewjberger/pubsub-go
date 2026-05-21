@@ -83,10 +83,13 @@ Full API reference and patterns (reconnect wrapper, typed topic helpers, multi-t
 
 ## Design
 
-- **Wire types** in [`pubsub/protocol.go`](pubsub/protocol.go) are plain data structs. `PeerEvent` is a flat tagged union (`kind: "connect" | "publish" | "subscribe" | "unsubscribe" | "ping"`) sent client to broker. `BrokerMessage` is `{topic, payload}` sent broker to subscriber. Both serialize as JSON with no methods on the wire types.
-- **State** for the broker and client lives in plain struct fields. **Behaviour** is in package-level functions (`Publish`, `Subscribe`, `Unsubscribe`, `Inbox`, `registerPeer`, `publishToSubscribers`). Methods exist only for Go-standard lifecycle (`Close`, `Shutdown`) and trivial accessors (`ID`, `Address`). Data-oriented, not object-oriented; same style as [`wgpu-example-go`](https://github.com/matthewjberger/wgpu-example-go) and [`freecs-go`](https://github.com/matthewjberger/freecs-go).
-- **Single mutator on the broker.** One goroutine touches the peer and subscription maps. Reader goroutines funnel events in through a buffered channel; writer goroutines drain per-peer outbound channels back out. No locks on broker state.
-- **Application payloads are `json.RawMessage`.** The broker never has to know an application's schema and never re-encodes a publish.
+The wire types in [`pubsub/protocol.go`](pubsub/protocol.go) are plain data structs. `PeerEvent` is a flat tagged union (`kind: "connect" | "publish" | "subscribe" | "unsubscribe" | "ping"`) sent client to broker. `BrokerMessage` is `{topic, payload}` sent broker to subscriber. Both serialize as JSON, no methods.
+
+State for the broker and client lives in plain struct fields. Behaviour is in package-level functions (`Publish`, `Subscribe`, `Unsubscribe`, `Inbox`, `registerPeer`, `publishToSubscribers`). The only methods are Go-standard lifecycle (`Close`, `Shutdown`) and trivial accessors (`ID`, `Address`). Data-oriented, not object-oriented; same style as [`wgpu-example-go`](https://github.com/matthewjberger/wgpu-example-go) and [`freecs-go`](https://github.com/matthewjberger/freecs-go).
+
+One goroutine on the broker touches the peer and subscription maps. Reader goroutines funnel events in through a buffered channel; writer goroutines drain per-peer outbound channels back out. No locks on broker state.
+
+Application payloads are `json.RawMessage` end to end. The broker never has to know an application's schema and never re-encodes a publish.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full goroutine/channel diagram and [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire spec.
 
