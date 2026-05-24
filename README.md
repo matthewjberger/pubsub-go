@@ -83,13 +83,13 @@ Full API reference and patterns (reconnect wrapper, typed topic helpers, multi-t
 
 ## Design
 
-State for the broker and client lives in plain struct fields. Behaviour lives in package-level functions that take the state as their first argument (`Publish`, `Subscribe`, `Unsubscribe`, `Inbox`, `registerPeer`, `publishToSubscribers`). The only methods are resource lifecycle (`Close`, `Shutdown`, which satisfy the usual `defer x.Close()` shape) and trivial accessors (`ID`, `Address`). It is data-oriented, not object-oriented.
+State for the broker and client lives in plain struct fields. Behaviour lives in package-level functions that take the state as their first argument (`Publish`, `Subscribe`, `Unsubscribe`, `Inbox`, `registerPeer`, `deliverPublish`). The only methods are resource lifecycle (`Close`, `Shutdown`, which satisfy the usual `defer x.Close()` shape) and trivial accessors (`ID`, `Address`). It is data-oriented, not object-oriented.
 
 One goroutine on the broker touches the peer and subscription maps. Reader goroutines funnel events in through a buffered channel, and writer goroutines drain per-peer outbound channels back out. Because there is exactly one mutator, the maps need no locks. Any new operation becomes a new event variant handled in the same loop rather than a new mutator.
 
-Application payloads are `json.RawMessage` end to end. The broker never reflects on the payload shape, never re-encodes a publish, and never needs to know an application's schema.
+Application payloads are `json.RawMessage` end to end. The broker never reflects on the payload shape, never re-encodes a publish, and never needs to know an application's schema. A fan-out frame is encoded once and the same bytes are written to every subscriber, so a publish to N subscribers marshals once, not N times.
 
-Subscribe and unsubscribe are synchronous. The client stamps a sequence number on the request and the broker echoes it back in an acknowledgement frame, so a successful return means the broker has applied the change. Publishes stay fire-and-forget.
+Subscribe and unsubscribe are synchronous. The client stamps a sequence number on the request and the broker echoes it back in an acknowledgement frame, so a successful return means the broker has applied the change. Publishes are backpressured, not dropped: the broker fans a publish out on the publishing connection's own reader goroutine, so a subscriber whose per-subscriber buffer (`SubscriberBuffer`, default 256) is full stalls that reader, which stops draining the publisher's socket and throttles the publisher to the slowest subscriber's rate. Nothing is silently discarded.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full goroutine/channel diagram and [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire spec.
 
@@ -129,7 +129,7 @@ Full spec, delivery semantics, and a minimal Python interop client: [`docs/PROTO
 ## What this is not
 
 - Not a queue. Messages are not persisted. A subscriber that connects after a publish does not see the historical message.
-- Not at-least-once. Delivery is best-effort with a small per-subscriber buffer. A slow subscriber's messages are dropped (and logged on the broker side).
+- Not durable. There is no on-disk log and no replay; a message lives only long enough to be handed to the subscribers connected when it is published. Delivery to those subscribers is backpressured rather than best-effort: a slow subscriber throttles the publisher instead of having its messages dropped. (A subscriber that disconnects mid-fan-out is skipped, and a stuck subscriber that stops reading is evicted after `WriteTimeout`.)
 - No broker-to-broker federation, no bridges.
 - No auth, no TLS. Anyone who can reach the TCP port can publish or subscribe to any topic.
 - No reconnection. `Client.Close` is final. Wrap `ConnectClient` in a retry loop if you want reconnect-on-disconnect.

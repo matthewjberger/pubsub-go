@@ -26,7 +26,7 @@ Every TCP frame is:
 3. **Operations.** The client sends any sequence of `PeerEvent` frames: `publish`, `subscribe`, `unsubscribe`, `ping`. The broker sends frames back: a `message` frame for every published message that matches a topic the client subscribed to, and an `ack` frame for every `subscribe` and `unsubscribe`.
 4. **Close.** Either side closes the TCP connection. The broker drops the peer from its subscription tables on EOF; the client drains any buffered inbound messages and closes its inbox channel.
 
-The protocol is duplex and asynchronous. Publishes are fire-and-forget. Subscribes and unsubscribes carry a `seq` that the broker echoes back in an `ack`, which is the only request/response correlation in the protocol; a client uses it to make `subscribe` synchronous so a publish cannot race ahead of a subscription.
+The protocol is duplex and asynchronous. Publishes get no `ack` frame, but they are not unbounded: the broker applies TCP-level backpressure to a publisher whose subscribers cannot keep up (see [Delivery semantics](#delivery-semantics)). Subscribes and unsubscribes carry a `seq` that the broker echoes back in an `ack`, which is the only request/response correlation in the protocol; a client uses it to make `subscribe` synchronous so a publish cannot race ahead of a subscription.
 
 ## Client to broker: `PeerEvent`
 
@@ -66,7 +66,7 @@ Asks the broker to fan `payload` out to every subscriber of `topic`. The broker 
 }
 ```
 
-`payload` can be any JSON value (object, array, string, number, boolean, null). Publishing is fire-and-forget; the broker sends no acknowledgement.
+`payload` can be any JSON value (object, array, string, number, boolean, null). The broker sends no acknowledgement for a publish. It does, however, stop reading a publisher's connection while any of that publisher's target subscribers is saturated, so a publisher that outruns its subscribers will find its own writes blocking (see [Delivery semantics](#delivery-semantics)).
 
 ### `subscribe`
 
@@ -129,11 +129,13 @@ Confirms that the broker applied a `subscribe` or `unsubscribe`. It echoes the `
 {"kind": "ack", "seq": 1}
 ```
 
-A client that sent a `subscribe` with `seq: 1` knows the subscription is in effect once it reads the matching `ack`. Acknowledgements are best-effort like deliveries: if the peer's outbound buffer is full the broker drops the `ack` and logs it. Subscribe and unsubscribe are idempotent, so a client whose `ack` was dropped can safely retry.
+A client that sent a `subscribe` with `seq: 1` knows the subscription is in effect once it reads the matching `ack`. Unlike a delivery, an `ack` is best-effort: the broker sends it without blocking, so if the peer's outbound buffer happens to be full the `ack` is dropped and logged rather than stalling the broker loop. Subscribe and unsubscribe are idempotent, so a client whose `ack` was dropped can safely retry (its bounded wait will expire and it can re-issue).
 
 ## Delivery semantics
 
-Delivery is best-effort, at-most-once. Each subscriber has a bounded outbound buffer on the broker side. If a subscriber is too slow to drain, the broker drops the message for that subscriber and writes one log line. No retry, no NAK, no per-subscriber backpressure to the publisher. A dropped message is gone.
+Delivery is backpressured. Each subscriber has a bounded outbound buffer on the broker side (`SubscriberBuffer`, default 256). The broker fans a publish out on the publishing connection's own handler, sending to each subscriber's buffer in turn. If a subscriber's buffer is full, that send blocks, which stops the broker reading the publisher's socket, which fills the publisher's kernel send buffer, which blocks the publisher's next write. The publisher is throttled to the slowest subscriber's rate; messages to a merely-slow subscriber are not dropped.
+
+Two cases break that chain rather than block forever: a subscriber that **disconnects** during a fan-out is skipped, and a subscriber that **stops reading entirely** is evicted once a single broker-side write to it exceeds `WriteTimeout` (default 30s), at which point its connection is closed. A publisher whose `Publish` carries a `ctx` deadline stops waiting when that deadline fires.
 
 Within a single subscriber, messages on the same topic from the same publisher arrive in publish order. Across topics or across publishers there is no global ordering. The broker processes events from one peer at a time, but other peers may interleave between any two of yours.
 
@@ -145,7 +147,7 @@ Malformed frames close the connection on whichever side reads them. Same for fra
 
 If a client's first frame is not a valid `connect`, the broker closes the connection without sending anything.
 
-A slow subscriber gets its message dropped (and logged broker-side) but its connection stays open. The broker does not retaliate against the subscriber.
+A slow subscriber backpressures its publishers but keeps its connection. A subscriber that stops reading altogether is evicted once a broker-side write to it exceeds `WriteTimeout`: the broker closes that connection (and logs it) so a wedged peer cannot stall publishers indefinitely.
 
 When a publisher disconnects, the broker scrubs its subscriptions on EOF. Messages that had already been fanned out still reach subscribers.
 

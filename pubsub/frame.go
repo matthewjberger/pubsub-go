@@ -13,24 +13,34 @@ import (
 // hostile or buggy peer cannot force the broker to allocate gigabytes.
 const MaxFrameSize = 16 * 1024 * 1024
 
+// encodeFrame JSON-encodes value into a single length-prefixed frame: a
+// 4-byte big-endian length followed by the JSON body. The broker encodes a
+// fan-out frame once with this and writes the same bytes to every subscriber,
+// so a publish to N subscribers marshals once rather than N times.
+func encodeFrame(value any) ([]byte, error) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("pubsub: marshal frame: %w", err)
+	}
+	if len(body) > MaxFrameSize {
+		return nil, fmt.Errorf("pubsub: frame too large: %d bytes > %d", len(body), MaxFrameSize)
+	}
+	out := make([]byte, 4+len(body))
+	binary.BigEndian.PutUint32(out[:4], uint32(len(body)))
+	copy(out[4:], body)
+	return out, nil
+}
+
 // WriteFrame JSON-encodes value and writes it framed: a 4-byte big-endian
 // length prefix followed by the JSON body. One call writes one complete
 // frame. The write is performed as a single Write to minimise the number of
 // short writes the OS sees; callers wrapping w in a [bufio.Writer] should
 // flush after the frame.
 func WriteFrame(writer io.Writer, value any) error {
-	body, err := json.Marshal(value)
+	out, err := encodeFrame(value)
 	if err != nil {
-		return fmt.Errorf("pubsub: marshal frame: %w", err)
+		return err
 	}
-	if len(body) > MaxFrameSize {
-		return fmt.Errorf("pubsub: frame too large: %d bytes > %d", len(body), MaxFrameSize)
-	}
-	header := [4]byte{}
-	binary.BigEndian.PutUint32(header[:], uint32(len(body)))
-	out := make([]byte, 0, 4+len(body))
-	out = append(out, header[:]...)
-	out = append(out, body...)
 	if _, err := writer.Write(out); err != nil {
 		return fmt.Errorf("pubsub: write frame: %w", err)
 	}

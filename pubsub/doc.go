@@ -55,4 +55,11 @@
 // the request's sequence number back as an acknowledgement, so a successful
 // return means the subscription is in effect and there is no
 // subscribe/publish race to sleep around.
+//
+// Publishes are backpressured rather than dropped. A publish is fanned out on
+// the publishing connection's reader goroutine, which sends the (once-encoded)
+// frame to each subscriber's outbound channel; a full channel blocks that
+// reader, stops it draining the publisher's socket, and throttles the
+// publishing client to the slowest subscriber's rate. The broker loop itself
+// never blocks on a slow subscriber.
 package pubsub

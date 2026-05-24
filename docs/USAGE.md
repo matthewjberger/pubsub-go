@@ -24,9 +24,10 @@ Pass `context.Background()` when you do not need a deadline, or a `context.WithT
 
 ```go
 broker, err := pubsub.StartBroker(pubsub.BrokerConfig{
-    Address:      "127.0.0.1:9000", // or "0.0.0.0:9000" or ":0" for a kernel-assigned port
-    Log:          nil,              // nil falls back to stderr with "[broker] " prefix
-    WriteTimeout: 0,                // 0 uses DefaultWriteTimeout (30s)
+    Address:          "127.0.0.1:9000", // or "0.0.0.0:9000" or ":0" for a kernel-assigned port
+    Log:              nil,              // nil falls back to stderr with "[broker] " prefix
+    WriteTimeout:     0,                // 0 uses DefaultWriteTimeout (30s)
+    SubscriberBuffer: 0,                // 0 uses DefaultSubscriberBuffer (256)
 })
 if err != nil {
     log.Fatal(err)
@@ -35,6 +36,8 @@ defer broker.Shutdown()
 ```
 
 `StartBroker` returns once the listener is up. The accept and broker loops are already running in goroutines. `WriteTimeout` bounds a single socket write to one peer. A write that blocks past the timeout drops that connection so its writer goroutine cannot leak.
+
+`SubscriberBuffer` is the per-subscriber outbound queue depth. It sets how far a publisher may run ahead of a subscriber before publishing backpressures: once a subscriber's queue is full, the publisher delivering to it blocks (see [Publish](#publish)). A larger buffer absorbs more burst before throttling at the cost of more queued memory per subscriber.
 
 ### Address
 
@@ -86,7 +89,7 @@ if err := pubsub.Publish(ctx, client, "weather/current", Weather{TempCelsius: 21
 }
 ```
 
-`Publish` marshals the payload to JSON before sending. It is fire-and-forget: a nil return means the frame was written, not that any subscriber received it. Use `PublishRaw` if you already have JSON bytes and want to avoid the re-encode:
+`Publish` marshals the payload to JSON before sending. A nil return means the broker accepted the frame for fan-out to the subscribers connected at that moment, not that any application has yet read it off its inbox. Delivery is backpressured, not best-effort: if a subscriber is too slow to drain, the broker stops reading this publisher's socket, and a subsequent `Publish` blocks until the slow subscriber catches up or the call's `ctx` deadline fires. Pass a `ctx` with a timeout if you do not want a publish to block indefinitely behind a stuck subscriber. Use `PublishRaw` if you already have JSON bytes and want to avoid the re-encode:
 
 ```go
 raw := json.RawMessage(`{"temp_c":21.4,"humidity":65}`)
