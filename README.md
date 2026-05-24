@@ -6,17 +6,6 @@ A small topic-based pub/sub broker and client for Go. Clients connect over TCP, 
 
 The wire format is one length-prefixed JSON frame per message (a `uint32` big-endian length followed by that many bytes of JSON), so any language with TCP and JSON can speak it. The Go API is data-oriented: state lives in plain structs, and the operations are package-level functions that take the state as their first argument.
 
-## What this is not
-
-- Not a queue. Messages are not persisted. A subscriber that connects after a publish does not see the historical message.
-- Not at-least-once. Delivery is best-effort with a small per-subscriber buffer. A slow subscriber's messages are dropped (and logged on the broker side).
-- No broker-to-broker federation, no bridges.
-- No auth, no TLS. Anyone who can reach the TCP port can publish or subscribe to any topic.
-- No reconnection. `Client.Close` is final. Wrap `ConnectClient` in a retry loop if you want reconnect-on-disconnect.
-- No wildcard topics. Subscribe to the exact string you want.
-
-These omissions are deliberate. They keep the surface small. If you need any of them, this is not the library for your use case, and adding them is a straightforward extension of the same goroutine layout.
-
 ## Prerequisites
 
 - **Go 1.23+** on PATH. Earlier versions probably work but are not tested.
@@ -136,6 +125,17 @@ The first frame after dialing must be a `connect`. Anything else closes the conn
 A `message` carries one published payload, byte-for-byte the bytes the publisher sent. An `ack` confirms that the broker applied the subscribe or unsubscribe with the matching `seq`.
 
 Full spec, delivery semantics, and a minimal Python interop client: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+## What this is not
+
+- Not a queue. Messages are not persisted. A subscriber that connects after a publish does not see the historical message.
+- Not at-least-once. Delivery is best-effort with a small per-subscriber buffer. A slow subscriber's messages are dropped (and logged on the broker side).
+- No broker-to-broker federation, no bridges.
+- No auth, no TLS. Anyone who can reach the TCP port can publish or subscribe to any topic.
+- No reconnection. `Client.Close` is final. Wrap `ConnectClient` in a retry loop if you want reconnect-on-disconnect.
+- No wildcard topics. Subscribe to the exact string you want.
+
+These omissions are deliberate. They keep the surface small. If you need any of them, this is not the library for your use case, and adding them is a straightforward extension of the same goroutine layout.
 
 ## Documentation
 
