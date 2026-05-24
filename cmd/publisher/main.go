@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -14,7 +15,7 @@ import (
 	"github.com/matthewjberger/pubsub-go/pubsub"
 )
 
-// Weather is the demo payload type. It is plain data with JSON tags —
+// Weather is the demo payload type. It is plain data with JSON tags;
 // nothing protocol-specific lives on it.
 type Weather struct {
 	TempCelsius float64 `json:"temp_c"`
@@ -29,7 +30,9 @@ func main() {
 	interval := flag.Duration("interval", 500*time.Millisecond, "publish interval")
 	flag.Parse()
 
-	client, err := pubsub.ConnectClient(pubsub.ClientConfig{ID: *id, Address: *address})
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := pubsub.ConnectClient(connectCtx, pubsub.ClientConfig{ID: *id, Address: *address})
+	cancelConnect()
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
@@ -51,7 +54,10 @@ func main() {
 				Humidity:    60 + 10*cosTick(tick),
 				Tick:        tick,
 			}
-			if err := pubsub.Publish(client, *topic, payload); err != nil {
+			publishCtx, cancelPublish := context.WithTimeout(context.Background(), 2*time.Second)
+			err := pubsub.Publish(publishCtx, client, *topic, payload)
+			cancelPublish()
+			if err != nil {
 				log.Printf("publish: %v", err)
 				return
 			}

@@ -4,12 +4,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/matthewjberger/pubsub-go/pubsub"
 )
@@ -25,18 +27,23 @@ func main() {
 		log.Fatalf("at least one topic is required")
 	}
 
-	client, err := pubsub.ConnectClient(pubsub.ClientConfig{
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
+	client, err := pubsub.ConnectClient(connectCtx, pubsub.ClientConfig{
 		ID:            *id,
 		Address:       *address,
 		InboxCapacity: 64,
 	})
+	cancelConnect()
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
 	defer client.Close()
 
 	for _, topic := range topics {
-		if err := pubsub.Subscribe(client, topic); err != nil {
+		subscribeCtx, cancelSubscribe := context.WithTimeout(context.Background(), 5*time.Second)
+		err := pubsub.Subscribe(subscribeCtx, client, topic)
+		cancelSubscribe()
+		if err != nil {
 			log.Fatalf("subscribe %q: %v", topic, err)
 		}
 		log.Printf("subscribed to %q", topic)

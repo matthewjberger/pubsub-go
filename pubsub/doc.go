@@ -22,16 +22,20 @@
 //
 // Dial a broker with [ConnectClient]. Subscribe to topics, publish payloads
 // of any JSON-serializable type, and read incoming messages off the inbox.
+// Every operation takes a [context.Context]: it bounds the connect and the
+// individual writes, and bounds the wait for a subscribe/unsubscribe
+// acknowledgement.
 //
-//	client, err := pubsub.ConnectClient(pubsub.ClientConfig{
+//	ctx := context.Background()
+//	client, err := pubsub.ConnectClient(ctx, pubsub.ClientConfig{
 //	    ID:      "demo",
 //	    Address: "127.0.0.1:9000",
 //	})
 //	if err != nil { log.Fatal(err) }
 //	defer client.Close()
 //
-//	pubsub.Subscribe(client, "weather/current")
-//	pubsub.Publish(client, "weather/current", map[string]any{"temp_c": 21.4})
+//	pubsub.Subscribe(ctx, client, "weather/current")
+//	pubsub.Publish(ctx, client, "weather/current", map[string]any{"temp_c": 21.4})
 //
 //	for message := range pubsub.Inbox(client) {
 //	    fmt.Printf("%s -> %s\n", message.Topic, message.Payload)
@@ -39,12 +43,16 @@
 //
 // # Design
 //
-// State is held in plain structs ([Broker], [Client]); all behaviour is in
-// package-level functions that operate on them. Each peer connection on the
-// broker is owned by a dedicated reader goroutine that pushes decoded events
-// into a single broker loop; the loop is the only place that mutates the
-// subscription map. Each peer also has a writer goroutine that drains its
-// per-peer outbound channel onto the socket. This is the same shape as the
-// reference Rust IPC broker, minus the bridging, deferred publishing, and
-// scheduling layers.
+// State is held in plain structs ([Broker], [Client]); behaviour is in
+// package-level functions that operate on them. The exceptions are resource
+// lifecycle ([Client.Close], [Broker.Shutdown]) and trivial accessors
+// ([Client.ID], [Client.Address], [Broker.Address]), which are methods.
+// Each peer connection on the broker is owned by a dedicated reader
+// goroutine that pushes decoded events into a single broker loop; the loop
+// is the only place that mutates the subscription map. Each peer also has a
+// writer goroutine that drains its per-peer outbound channel onto the
+// socket. [Subscribe] and [Unsubscribe] are synchronous: the broker echoes
+// the request's sequence number back as an acknowledgement, so a successful
+// return means the subscription is in effect and there is no
+// subscribe/publish race to sleep around.
 package pubsub

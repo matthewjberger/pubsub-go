@@ -6,7 +6,7 @@ The full text of each license is in [`LICENSE-MIT`](../LICENSE-MIT) and [`LICENS
 
 ## Why dual MIT + Apache-2.0
 
-This is the same dual-licensing scheme the Rust ecosystem uses by default (the same as the standard library, the Rust compiler, and most major crates). It pairs well in mixed-language projects where some downstream depends on Rust crates that already require Apache-2.0 compatibility.
+Offering both licenses lets a downstream pick whichever fits its own obligations. A project that needs an explicit patent grant takes Apache-2.0; a project that wants the shortest possible notice takes MIT. Neither choice asks anything of the other.
 
 - **MIT** is the simplest permissive license: a short notice, no patent grant.
 - **Apache-2.0** adds an explicit patent grant from contributors, an explicit attribution requirement, and a `NOTICE` carry-forward convention.

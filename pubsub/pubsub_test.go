@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -11,6 +12,15 @@ import (
 // silentLogger discards broker/client diagnostics during tests.
 func silentLogger() *log.Logger {
 	return log.New(io.Discard, "", 0)
+}
+
+// testContext returns a context bounded so a stuck call fails the test
+// instead of hanging the suite.
+func testContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 func startBrokerOnEphemeralPort(t *testing.T) *Broker {
@@ -27,7 +37,7 @@ func startBrokerOnEphemeralPort(t *testing.T) *Broker {
 
 func connect(t *testing.T, broker *Broker, id string) *Client {
 	t.Helper()
-	client, err := ConnectClient(ClientConfig{
+	client, err := ConnectClient(testContext(t), ClientConfig{
 		ID:            id,
 		Address:       broker.Address(),
 		InboxCapacity: 16,
@@ -48,17 +58,16 @@ func TestPublishSubscribeRoundTrip(t *testing.T) {
 	subscriber := connect(t, broker, "subscriber")
 	publisher := connect(t, broker, "publisher")
 
-	if err := Subscribe(subscriber, "weather/current"); err != nil {
+	// Subscribe is synchronous: when it returns, the broker has recorded
+	// the subscription, so the publish below cannot race ahead of it.
+	if err := Subscribe(testContext(t), subscriber, "weather/current"); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-
-	// Allow the broker to record the subscription before we publish.
-	waitUntilSubscriptionRegistered(t)
 
 	type weather struct {
 		TempCelsius float64 `json:"temp_c"`
 	}
-	if err := Publish(publisher, "weather/current", weather{TempCelsius: 21.4}); err != nil {
+	if err := Publish(testContext(t), publisher, "weather/current", weather{TempCelsius: 21.4}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
@@ -84,12 +93,11 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 	subscriber := connect(t, broker, "subscriber")
 	publisher := connect(t, broker, "publisher")
 
-	if err := Subscribe(subscriber, "topic"); err != nil {
+	if err := Subscribe(testContext(t), subscriber, "topic"); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-	waitUntilSubscriptionRegistered(t)
 
-	if err := Publish(publisher, "topic", "first"); err != nil {
+	if err := Publish(testContext(t), publisher, "topic", "first"); err != nil {
 		t.Fatalf("Publish first: %v", err)
 	}
 
@@ -103,12 +111,11 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 		t.Fatal("did not receive first message")
 	}
 
-	if err := Unsubscribe(subscriber, "topic"); err != nil {
+	if err := Unsubscribe(testContext(t), subscriber, "topic"); err != nil {
 		t.Fatalf("Unsubscribe: %v", err)
 	}
-	waitUntilSubscriptionRegistered(t)
 
-	if err := Publish(publisher, "topic", "second"); err != nil {
+	if err := Publish(testContext(t), publisher, "topic", "second"); err != nil {
 		t.Fatalf("Publish second: %v", err)
 	}
 
@@ -126,7 +133,7 @@ func TestDuplicateIDReconnectKeepsNewPeerLive(t *testing.T) {
 	// subscriptions.
 	broker := startBrokerOnEphemeralPort(t)
 
-	first, err := ConnectClient(ClientConfig{
+	first, err := ConnectClient(testContext(t), ClientConfig{
 		ID:            "shared-id",
 		Address:       broker.Address(),
 		InboxCapacity: 16,
@@ -135,10 +142,13 @@ func TestDuplicateIDReconnectKeepsNewPeerLive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConnectClient first: %v", err)
 	}
-	// Give the broker loop time to register the first connection.
-	waitUntilSubscriptionRegistered(t)
+	// A synchronous subscribe doubles as a barrier: its ack proves the
+	// broker has processed the first connection before the second dials.
+	if err := Subscribe(testContext(t), first, "barrier"); err != nil {
+		t.Fatalf("Subscribe first: %v", err)
+	}
 
-	second, err := ConnectClient(ClientConfig{
+	second, err := ConnectClient(testContext(t), ClientConfig{
 		ID:            "shared-id",
 		Address:       broker.Address(),
 		InboxCapacity: 16,
@@ -153,15 +163,15 @@ func TestDuplicateIDReconnectKeepsNewPeerLive(t *testing.T) {
 	// stranded socket triggers the old reader's stale disconnect.
 	_ = first.Close()
 
-	if err := Subscribe(second, "topic"); err != nil {
+	// The ack for this subscribe proves the broker applied it after the
+	// new connect. With the stale-disconnect bug, the first reader's
+	// disconnect would have evicted the new peer and this subscription
+	// would be lost.
+	if err := Subscribe(testContext(t), second, "topic"); err != nil {
 		t.Fatalf("Subscribe second: %v", err)
 	}
-	// Let the broker process: (a) the new connect, (b) the stale
-	// disconnect from the first reader, (c) the new subscribe. With the
-	// bug, (b) wins and (c) is silently dropped.
-	waitUntilSubscriptionRegistered(t)
 
-	publisher, err := ConnectClient(ClientConfig{
+	publisher, err := ConnectClient(testContext(t), ClientConfig{
 		ID:      "publisher",
 		Address: broker.Address(),
 		Log:     silentLogger(),
@@ -171,7 +181,7 @@ func TestDuplicateIDReconnectKeepsNewPeerLive(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = publisher.Close() })
 
-	if err := Publish(publisher, "topic", "hello"); err != nil {
+	if err := Publish(testContext(t), publisher, "topic", "hello"); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
@@ -189,7 +199,7 @@ func TestDuplicateIDReconnectKeepsNewPeerLive(t *testing.T) {
 func TestPingDoesNotEcho(t *testing.T) {
 	broker := startBrokerOnEphemeralPort(t)
 	client := connect(t, broker, "pinger")
-	if err := Ping(client); err != nil {
+	if err := Ping(testContext(t), client); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
 
@@ -200,10 +210,13 @@ func TestPingDoesNotEcho(t *testing.T) {
 	}
 }
 
-// waitUntilSubscriptionRegistered sleeps briefly so the broker loop has a
-// chance to drain its incoming events channel between a subscribe/publish
-// pair. Long enough to be reliable on Windows CI, short enough that the
-// suite stays fast.
-func waitUntilSubscriptionRegistered(_ *testing.T) {
-	time.Sleep(50 * time.Millisecond)
+func TestSubscribeAfterCloseReturnsErrClosed(t *testing.T) {
+	broker := startBrokerOnEphemeralPort(t)
+	client := connect(t, broker, "closer")
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := Subscribe(testContext(t), client, "topic"); err != ErrClosed {
+		t.Fatalf("Subscribe after close = %v, want %v", err, ErrClosed)
+	}
 }

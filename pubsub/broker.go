@@ -9,17 +9,26 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
 // BrokerConfig configures a [Broker] at startup. Address is a host:port
 // string suitable for [net.Listen]. Log is the destination for broker
 // diagnostics; if nil, a logger writing to [os.Stderr] is created. Pass
 // "127.0.0.1:0" to bind to a kernel-assigned port and read the actual
-// address back with [Broker.Address].
+// address back with [Broker.Address]. WriteTimeout bounds a single socket
+// write to one peer; if zero, [DefaultWriteTimeout] is used. A write that
+// blocks past the timeout (a stuck or wedged peer) drops that connection so
+// its writer goroutine cannot leak.
 type BrokerConfig struct {
-	Address string
-	Log     *log.Logger
+	Address      string
+	Log          *log.Logger
+	WriteTimeout time.Duration
 }
+
+// DefaultWriteTimeout is the per-write deadline applied to a peer socket
+// when [BrokerConfig.WriteTimeout] is left zero.
+const DefaultWriteTimeout = 30 * time.Second
 
 // Broker is the running state of a pub/sub broker. Construct one with
 // [StartBroker]. The map of connected peers and the map of subscriptions
@@ -27,13 +36,14 @@ type BrokerConfig struct {
 // broker state from outside is through connected [Client]s, or through
 // [Broker.Shutdown] to stop the broker.
 type Broker struct {
-	listener   net.Listener
-	log        *log.Logger
-	events     chan brokerEvent
-	shutdown   chan struct{}
-	shutdownMu sync.Mutex
-	closed     bool
-	loopDone   chan struct{}
+	listener     net.Listener
+	log          *log.Logger
+	writeTimeout time.Duration
+	events       chan brokerEvent
+	shutdown     chan struct{}
+	shutdownMu   sync.Mutex
+	closed       bool
+	loopDone     chan struct{}
 }
 
 // brokerEventKind tags variants of [brokerEvent].
@@ -56,7 +66,7 @@ type brokerEvent struct {
 	kind       brokerEventKind
 	peerID     string
 	conn       net.Conn
-	outbound   chan BrokerMessage
+	outbound   chan brokerFrame
 	connClosed chan struct{}
 	event      PeerEvent
 }
@@ -64,7 +74,7 @@ type brokerEvent struct {
 // peer is the broker-side view of one connected client. It is touched only
 // by the broker loop.
 type peer struct {
-	outbound   chan BrokerMessage
+	outbound   chan brokerFrame
 	connClosed chan struct{}
 	conn       net.Conn
 }
@@ -77,16 +87,21 @@ func StartBroker(cfg BrokerConfig) (*Broker, error) {
 	if logger == nil {
 		logger = log.New(os.Stderr, "[broker] ", log.LstdFlags|log.Lmsgprefix)
 	}
+	writeTimeout := cfg.WriteTimeout
+	if writeTimeout == 0 {
+		writeTimeout = DefaultWriteTimeout
+	}
 	listener, err := net.Listen("tcp", cfg.Address)
 	if err != nil {
 		return nil, fmt.Errorf("pubsub: listen %s: %w", cfg.Address, err)
 	}
 	b := &Broker{
-		listener: listener,
-		log:      logger,
-		events:   make(chan brokerEvent, 256),
-		shutdown: make(chan struct{}),
-		loopDone: make(chan struct{}),
+		listener:     listener,
+		log:          logger,
+		writeTimeout: writeTimeout,
+		events:       make(chan brokerEvent, 256),
+		shutdown:     make(chan struct{}),
+		loopDone:     make(chan struct{}),
 	}
 	go runBrokerLoop(b)
 	go runAcceptLoop(b)
@@ -159,7 +174,7 @@ func runConnectionReader(b *Broker, conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	outbound := make(chan BrokerMessage, 64)
+	outbound := make(chan brokerFrame, 64)
 	connClosed := make(chan struct{})
 	id := firstEvent.ID
 
@@ -204,12 +219,15 @@ readLoop:
 
 // runConnectionWriter drains outbound onto conn until the connection
 // closes or the writer is told to stop.
-func runConnectionWriter(b *Broker, conn net.Conn, id string, outbound chan BrokerMessage, connClosed chan struct{}) {
+func runConnectionWriter(b *Broker, conn net.Conn, id string, outbound chan brokerFrame, connClosed chan struct{}) {
 	for {
 		select {
 		case message, ok := <-outbound:
 			if !ok {
 				return
+			}
+			if b.writeTimeout > 0 {
+				_ = conn.SetWriteDeadline(time.Now().Add(b.writeTimeout))
 			}
 			if err := WriteFrame(conn, message); err != nil {
 				b.log.Printf("write to %s (%s): %v", id, conn.RemoteAddr(), err)
@@ -282,8 +300,10 @@ func handlePeerEvent(b *Broker, peers map[string]peer, subscriptions map[string]
 		publishToSubscribers(b, peers, subscriptions, event.Topic, event.Payload)
 	case PeerEventSubscribe:
 		addSubscription(b, subscriptions, peerID, event.Topic)
+		acknowledge(b, peers, peerID, event.Seq)
 	case PeerEventUnsubscribe:
 		removeSubscription(b, subscriptions, peerID, event.Topic)
+		acknowledge(b, peers, peerID, event.Seq)
 	case PeerEventPing:
 	case PeerEventConnect:
 		b.log.Printf("ignoring duplicate connect from %q", peerID)
@@ -302,7 +322,7 @@ func publishToSubscribers(b *Broker, peers map[string]peer, subscriptions map[st
 	if !ok || len(subscribers) == 0 {
 		return
 	}
-	message := BrokerMessage{Topic: topic, Payload: payload}
+	message := brokerFrame{Kind: brokerFrameMessage, Topic: topic, Payload: payload}
 	for subscriberID := range subscribers {
 		p, ok := peers[subscriberID]
 		if !ok {
@@ -313,6 +333,27 @@ func publishToSubscribers(b *Broker, peers map[string]peer, subscriptions map[st
 		default:
 			b.log.Printf("dropping message on topic %q for slow subscriber %q", topic, subscriberID)
 		}
+	}
+}
+
+// acknowledge sends an ack frame echoing seq back to peerID so a synchronous
+// [Subscribe] or [Unsubscribe] can return. A zero seq (a peer that did not
+// ask for an ack) is skipped. Delivery is best-effort like a publish: if the
+// peer's outbound buffer is full the ack is dropped and the caller's context
+// deadline eventually fires. Subscribe and unsubscribe are idempotent, so a
+// retry after a dropped ack is safe.
+func acknowledge(b *Broker, peers map[string]peer, peerID string, seq uint64) {
+	if seq == 0 {
+		return
+	}
+	p, ok := peers[peerID]
+	if !ok {
+		return
+	}
+	select {
+	case p.outbound <- brokerFrame{Kind: brokerFrameAck, Seq: seq}:
+	default:
+		b.log.Printf("dropping ack seq %d for slow peer %q", seq, peerID)
 	}
 }
 
@@ -344,9 +385,9 @@ func removeSubscription(b *Broker, subscriptions map[string]map[string]struct{},
 // removePeerIfCurrent evicts a peer and scrubs it from every topic, but
 // only if the peer currently registered under peerID is the same one that
 // owned outbound. A previous peer evicted by registerPeer eventually
-// reports a disconnect of its own — we drop those silently so they can't
+// reports a disconnect of its own, which we drop silently so they can't
 // remove the new peer.
-func removePeerIfCurrent(b *Broker, peers map[string]peer, subscriptions map[string]map[string]struct{}, peerID string, outbound chan BrokerMessage) {
+func removePeerIfCurrent(b *Broker, peers map[string]peer, subscriptions map[string]map[string]struct{}, peerID string, outbound chan brokerFrame) {
 	current, ok := peers[peerID]
 	if !ok || current.outbound != outbound {
 		return
