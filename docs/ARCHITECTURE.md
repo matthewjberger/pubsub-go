@@ -6,17 +6,15 @@ All file paths in this doc are relative to the repo root.
 
 ## Layers
 
-```
-Application Layer:  cmd/broker, cmd/publisher, cmd/subscriber
-                            |
-Client Layer:       pubsub/client.go            (Client, Publish, Subscribe, Inbox)
-                            |
-Broker Layer:       pubsub/broker.go            (Broker, accept loop, broker loop)
-                            |
-Protocol Layer:     pubsub/protocol.go          (PeerEvent, BrokerMessage)
-                    pubsub/frame.go             (WriteFrame, ReadFrame)
-                            |
-Foundation:         net, encoding/json, encoding/binary, bufio
+```mermaid
+flowchart TD
+    app["Application Layer<br/>cmd/broker, cmd/publisher, cmd/subscriber"]
+    client["Client Layer<br/>pubsub/client.go — Client, Publish, Subscribe, Inbox"]
+    broker["Broker Layer<br/>pubsub/broker.go — Broker, accept loop, broker loop"]
+    protocol["Protocol Layer<br/>pubsub/protocol.go — PeerEvent, BrokerMessage<br/>pubsub/frame.go — WriteFrame, ReadFrame"]
+    foundation["Foundation<br/>net, encoding/json, encoding/binary, bufio"]
+
+    app --> client --> broker --> protocol --> foundation
 ```
 
 There is no foundation runtime in the project itself; every layer is built directly on the Go standard library.
@@ -33,28 +31,23 @@ These two files are the entire protocol surface. Any language with TCP, JSON, an
 
 **`pubsub/broker.go`** declares `Broker`, started by `StartBroker(BrokerConfig)`. A running broker has three kinds of goroutine:
 
+```mermaid
+flowchart TD
+    accept["runAcceptLoop"]
+    reader["runConnectionReader<br/>(one per peer)"]
+    loop["runBrokerLoop<br/>single mutator of<br/>peers + subscriptions"]
+    writer["runConnectionWriter<br/>(one per peer)<br/>drains outbound → socket"]
+
+    accept -->|spawns one reader per conn| reader
+    reader -->|brokerEvent| loop
+    loop -.->|subscriber snapshot reply| reader
+    reader -->|"message frames (fan-out to THIS<br/>publisher's subscribers' writers)"| writer
+    loop -->|ack frames| writer
+
+    shutdown(["Broker.Shutdown closes a shutdown<br/>channel every goroutine selects on"])
 ```
-                    +---------------+
-                    | runBrokerLoop |  <-- single mutator of peers + subscriptions
-                    +---------------+
-                          ^
-                          | brokerEvent
-                          |
-   +----------------+     |     +----------------------+
-   | runAcceptLoop  |---->|<----| runConnectionReader  |   (one per peer)
-   +----------------+     |     +----------------------+
-                          |              |
-                          |              | BrokerMessage
-                          |              v
-                          |     +----------------------+
-                          |     | runConnectionWriter  |   (one per peer)
-                          |     +----------------------+
-                          |
-                          | shutdown
-                  +-------+--------+
-                  | Broker.Shutdown |
-                  +----------------+
-```
+
+A writer's `outbound` channel is filled from two places: the broker loop pushes `ack` frames onto it, and the readers of *publishing* peers push `message` frames onto it during fan-out. A peer's own reader does not feed its own writer; it feeds the writers of whoever is subscribed to what it publishes.
 
 ### Accept loop
 
@@ -124,16 +117,13 @@ Carrying `outbound` (or any per-connection identity) on the disconnect event is 
 
 **`pubsub/client.go`** declares `Client`, dialed by `ConnectClient(ctx, ClientConfig)`. The dial uses `net.Dialer.DialContext`, so `ctx` bounds the connect. A running client has one goroutine:
 
-```
-        +-------------------+
-        |  runClientReader  |  <-- reads brokerFrame; message -> inbox, ack -> waiter
-        +-------------------+
-                  |
-                  v
-            inbox channel
-                  |
-                  v
-            consumer code
+```mermaid
+flowchart TD
+    reader["runClientReader<br/>reads brokerFrame; message → inbox, ack → waiter"]
+    inbox(["inbox channel"])
+    consumer["consumer code"]
+
+    reader -->|BrokerMessage| inbox --> consumer
 ```
 
 `runClientReader` decodes each `brokerFrame`. A `message` frame becomes a `BrokerMessage` pushed onto `inbox`; an `ack` frame wakes the matching waiter (see below). Acknowledgements never reach the inbox.

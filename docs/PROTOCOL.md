@@ -133,11 +133,11 @@ A client that sent a `subscribe` with `seq: 1` knows the subscription is in effe
 
 ## Delivery semantics
 
-Delivery is backpressured. Each subscriber has a bounded outbound buffer on the broker side (`SubscriberBuffer`, default 256). The broker fans a publish out on the publishing connection's own handler, sending to each subscriber's buffer in turn. If a subscriber's buffer is full, that send blocks, which stops the broker reading the publisher's socket, which fills the publisher's kernel send buffer, which blocks the publisher's next write. The publisher is throttled to the slowest subscriber's rate; messages to a merely-slow subscriber are not dropped.
+Delivery is backpressured. Each subscriber has a bounded outbound buffer on the broker side (`SubscriberBuffer`, default 256). The broker fans a publish out on the publishing connection's own reader goroutine, sending to each subscriber's buffer in turn. If a subscriber's buffer is full, that send blocks, which stops the broker reading the publisher's socket, which fills the publisher's kernel send buffer, which blocks the publisher's next write. The publisher is throttled to the slowest subscriber's rate; messages to a merely-slow subscriber are not dropped.
 
 Two cases break that chain rather than block forever: a subscriber that **disconnects** during a fan-out is skipped, and a subscriber that **stops reading entirely** is evicted once a single broker-side write to it exceeds `WriteTimeout` (default 30s), at which point its connection is closed. A publisher whose `Publish` carries a `ctx` deadline stops waiting when that deadline fires.
 
-Within a single subscriber, messages on the same topic from the same publisher arrive in publish order. Across topics or across publishers there is no global ordering. The broker processes events from one peer at a time, but other peers may interleave between any two of yours.
+Within a single subscriber, messages on the same topic from the same publisher arrive in publish order: one goroutine reads a publisher's frames and fans each out before reading the next, so that publisher's messages reach a subscriber's buffer in send order. Fan-out for different publishers runs on separate goroutines and is concurrent, so across publishers (or across topics) there is no global ordering.
 
 Messages are not stored. A subscriber that subscribes after a publish has happened does not see the historical message.
 

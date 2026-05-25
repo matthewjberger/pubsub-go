@@ -126,10 +126,14 @@ func Inbox(c *Client) <-chan BrokerMessage {
 	return c.inbox
 }
 
-// Publish marshals payload as JSON and sends it on topic. Use this when
-// you have a Go value to send. Publishing is fire-and-forget: a nil return
-// means the frame was written, not that any subscriber received it. ctx
-// bounds the write with a deadline if it carries one.
+// Publish marshals payload as JSON and sends it on topic. Use this when you
+// have a Go value to send. A nil return means the broker accepted the frame
+// for fan-out to the subscribers connected at that moment, not that any
+// application has read it. Delivery is backpressured: if a subscriber is too
+// slow to drain, the broker stops reading this connection and the call blocks
+// on the socket write until the subscriber catches up. ctx bounds that write
+// with a deadline if it carries one, so pass a deadline to cap how long a
+// publish may block behind a slow subscriber.
 func Publish(ctx context.Context, c *Client, topic string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
